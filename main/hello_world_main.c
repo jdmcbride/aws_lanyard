@@ -35,11 +35,14 @@ void app_main()
     printf("Tick period %d\n", portTICK_PERIOD_MS);
 
     while (1) {
+        lanyard_set_led(LANYARD_LED_ON);
         for (int i = 10; i >= 0; i--) {
-            // gpio_set_level(GPIO_OUTPUT_IO_LED, i & 1);
             vTaskDelay(200 / portTICK_PERIOD_MS);
             lanyard_rotate_leds(i);
-            // gpio_set_level(GPIO_OUTPUT_IO_LED, i & 1);
+            if (i == 5)
+            {
+                lanyard_set_led(LANYARD_LED_OFF);
+            }
         }
     }
     printf("Restarting now.\n");

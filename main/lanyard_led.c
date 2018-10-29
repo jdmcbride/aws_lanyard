@@ -1,16 +1,9 @@
 /* AWS ESP32 lanyard by Tekt Industries
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
 */
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
-#include "esp_spi_flash.h"
 #include "driver/gpio.h"
 
 #include "lanyard_led.h"
@@ -22,27 +15,12 @@
 #define GPIO_INPUT_BTN2 33
 #define NUM_LEDS 6
 
-#define GPIO_OUTPUT_PIN_SEL  (1ULL<<GPIO_OUTPUT_IO_LED)
-
 #define START_DELIMITER 0x00
 #define END_DELIMITER 0xFF
+#define PWM_GLOBAL_OFS 0xE0
 
-static esp_err_t config_gpio_for_led()
-{
-    gpio_config_t io_conf;
-    //disable interrupt
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    //set as output mode
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
-    //disable pull-up mode
-    io_conf.pull_up_en = 0;
-    //configure GPIO with the given settings
-    return gpio_config(&io_conf);
-}
+#define LED_ON  1
+#define LED_OFF 0
 
 static esp_err_t config_gpio_for_output(int io_pin)
 {
@@ -79,15 +57,17 @@ static esp_err_t config_gpio_for_input(int io_pin)
 }
 
 static void SPI_tranfer(int data_pin, int clk_pin, uint8_t val) {
-    // Bit banger to drive A
+    // Bit banger to drive APA102-2020 RGB leds
+    // Simple but inefficient as it waits - LED docs
+    // say 512kHz max clock rate, we are much lower using the tick.
     uint8_t bit;
 
     for (bit = 0x80; bit; bit >>= 1) {
-        /* Shift-out a bit to the MOSI line */
+        /* Shift-out a bit to the Data line */
         gpio_set_level(data_pin, val & bit);
         vTaskDelay(1 / portTICK_PERIOD_MS);
 
-        /* clock the data */
+        /* clock the data, 0->1 writes the data*/
         gpio_set_level(clk_pin, 1);
         vTaskDelay(1 / portTICK_PERIOD_MS);
         gpio_set_level(clk_pin, 0);
@@ -119,7 +99,7 @@ typedef struct button_read {
 static button_read_t button1;
 static button_read_t button2;
 
-#define DEBOUNCE_THRESHOLD 2
+#define DEBOUNCE_THRESHOLD 1
 
 static int read_button(int pin, button_read_t *out_br)
 {     
@@ -134,8 +114,7 @@ static int read_button(int pin, button_read_t *out_br)
     return (out_br->count == DEBOUNCE_THRESHOLD);
 }
 
-static uint8_t global = 0xE6;
-static uint8_t glb = 0;
+static uint8_t led_pwm = 0x1; // PWM set to lowest value (0-31)
 
 static uint8_t led_array[NUM_LEDS][3] = {
     { 0xFF, 0, 0 },
@@ -146,48 +125,53 @@ static uint8_t led_array[NUM_LEDS][3] = {
     { 0, 0, 0xFF }
 };
 
+static void read_buttons()
+{
+    int changed = 0;
+
+    if (read_button(GPIO_INPUT_BTN1, &button1) && button1.value == 0) {
+        led_pwm = (led_pwm + 1) & 0x1F;
+        changed++;
+    }
+    if (read_button(GPIO_INPUT_BTN2, &button2) && button2.value == 0) {
+        led_pwm = 0;
+        changed++;
+    }
+    if (changed)
+    {
+        printf("LED PWM %d\n", led_pwm);
+    }
+}
+
 void lanyard_rotate_leds(int sequence_posn)
 {
     write_delimiter(START_DELIMITER);
 
-   for (int i = 0; i < NUM_LEDS; i++) {
-        if (read_button(GPIO_INPUT_BTN1, &button1) && button1.value == 0) {
-            glb = ((glb + 1) & 0x1F);
-            global = 0xE0 + glb;
-            printf("Global %d : %d\n", global, glb);
+    read_buttons();
+    for (int i = 0; i < NUM_LEDS; i++)
+    {
+            int idx = (i + sequence_posn) % NUM_LEDS;
+            uint8_t red = led_array[idx][0];
+            uint8_t green = led_array[idx][1];
+            uint8_t blue = led_array[idx][2];
+            write_led(red, green, blue, PWM_GLOBAL_OFS + led_pwm);
         }
-        if (read_button(GPIO_INPUT_BTN2, &button2) && button2.value == 0) {
-            global = 0xE0;
-            printf("Global %d\n", global);
-        }
-        int idx = (i + sequence_posn) % NUM_LEDS;
-        uint8_t red = led_array[idx][0];
-        uint8_t green = led_array[idx][1];
-        uint8_t blue = led_array[idx][2];
-        write_led(red, green, blue, global);
-    }
-
-    write_led(255, 0, 0, global);
-    write_led(0, 255, 0, global);
-    write_led(0, 0, 255, global);
-    write_led(255, 255, 0, global);
-    write_led(0, 255, 255, global);
-    write_led(255, 0, 255, global);
 
     write_delimiter(END_DELIMITER);
 }
 
-void lanyard_set_led(in state)
+void lanyard_set_led(int state)
 {
+    gpio_set_level(GPIO_OUTPUT_IO_LED, state);
 }
 
 void lanyard_led_setup()
 {
-    config_gpio_for_led();
+    config_gpio_for_output(GPIO_OUTPUT_IO_LED);
     config_gpio_for_output(GPIO_OUTPUT_IO_CLK);
-    gpio_set_level(GPIO_OUTPUT_IO_CLK, 0);
+    gpio_set_level(GPIO_OUTPUT_IO_CLK, 0); // Ensure clock line is low
     config_gpio_for_output(GPIO_OUTPUT_IO_DATA);
     config_gpio_for_input(GPIO_INPUT_BTN1);
     config_gpio_for_input(GPIO_INPUT_BTN2);
-    gpio_set_level(GPIO_OUTPUT_IO_LED, 1); // turn on LED
+    lanyard_set_led(LED_ON);
 }
